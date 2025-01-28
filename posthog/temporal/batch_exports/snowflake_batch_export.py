@@ -10,8 +10,11 @@ import typing
 
 import pyarrow as pa
 import snowflake.connector
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 from django.conf import settings
 from snowflake.connector.connection import SnowflakeConnection
+from snowflake.connector.cursor import ResultMetadata
 from snowflake.connector.errors import InterfaceError, OperationalError
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
@@ -49,11 +52,7 @@ from posthog.temporal.batch_exports.temporary_file import (
     BatchExportTemporaryFile,
     WriterFormat,
 )
-from posthog.temporal.batch_exports.utils import (
-    JsonType,
-    set_status_to_running_task,
-)
-from posthog.temporal.common.clickhouse import get_client
+from posthog.temporal.batch_exports.utils import JsonType, set_status_to_running_task
 from posthog.temporal.common.heartbeat import Heartbeater
 from posthog.temporal.common.logger import bind_temporal_worker_logger
 
@@ -67,6 +66,12 @@ NON_RETRYABLE_ERROR_TYPES = [
     "ForbiddenError",
     # Our own exception when we can't connect to Snowflake, usually due to invalid parameters.
     "SnowflakeConnectionError",
+    # Raised when a table is not found in Snowflake.
+    "SnowflakeTableNotFoundError",
+    # Raised when a using key-pair auth and the private key or passphrase is not valid.
+    "InvalidPrivateKeyError",
+    # Raised when a valid authentication method is not provided.
+    "SnowflakeAuthenticationError",
 ]
 
 
@@ -100,6 +105,27 @@ class SnowflakeRetryableConnectionError(Exception):
     pass
 
 
+class SnowflakeTableNotFoundError(Exception):
+    """Raised when a table is not found in Snowflake."""
+
+    def __init__(self, table_name: str):
+        super().__init__(f"Table '{table_name}' not found in Snowflake")
+
+
+class SnowflakeAuthenticationError(Exception):
+    """Raised when a valid authentication method is not provided."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
+class InvalidPrivateKeyError(Exception):
+    """Raised when a private key is not valid."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
 @dataclasses.dataclass
 class SnowflakeHeartbeatDetails(BatchExportRangeHeartbeatDetails):
     """The Snowflake batch export details included in every heartbeat."""
@@ -117,7 +143,6 @@ class SnowflakeInsertInputs:
 
     team_id: int
     user: str
-    password: str
     account: str
     database: str
     warehouse: str
@@ -125,6 +150,10 @@ class SnowflakeInsertInputs:
     table_name: str
     data_interval_start: str | None
     data_interval_end: str
+    authentication_type: str = "password"
+    password: str | None = None
+    private_key: str | None = None
+    private_key_passphrase: str | None = None
     role: str | None = None
     exclude_events: list[str] | None = None
     include_events: list[str] | None = None
@@ -137,32 +166,86 @@ class SnowflakeInsertInputs:
 SnowflakeField = tuple[str, str]
 
 
+def load_private_key(private_key: str, passphrase: str | None) -> bytes:
+    try:
+        p_key = serialization.load_pem_private_key(
+            private_key.encode("utf-8"),
+            password=passphrase.encode() if passphrase is not None else None,
+            backend=default_backend(),
+        )
+    except (ValueError, TypeError) as e:
+        msg = "Invalid private key"
+        if passphrase is not None and "Incorrect password?" in str(e):
+            msg = "Could not load private key: incorrect passphrase?"
+        elif "Password was not given but private key is encrypted" in str(e):
+            msg = "Could not load private key: passphrase was not given but private key is encrypted"
+        raise InvalidPrivateKeyError(msg)
+
+    return p_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
 class SnowflakeClient:
     """Snowflake connection client used in batch exports."""
 
     def __init__(
-        self, user: str, password: str, account: str, warehouse: str, database: str, schema: str, role: str | None
+        self,
+        user: str,
+        account: str,
+        warehouse: str,
+        database: str,
+        schema: str,
+        role: str | None = None,
+        password: str | None = None,
+        private_key: bytes | None = None,
     ):
+        if password is None and private_key is None:
+            raise SnowflakeAuthenticationError("Either password or private key must be provided")
+
+        self.role = role
         self.user = user
         self.password = password
+        self.private_key = private_key
         self.account = account
         self.warehouse = warehouse
         self.database = database
         self.schema = schema
-        self.role = role
         self._connection: SnowflakeConnection | None = None
 
     @classmethod
     def from_inputs(cls, inputs: SnowflakeInsertInputs) -> typing.Self:
         """Initialize `SnowflakeClient` from `SnowflakeInsertInputs`."""
+
+        # User could have specified both password and private key in their batch export config.
+        # (for example, if they've already created a batch export with password auth and are now switching to keypair auth)
+        # Therefore we decide which one to use based on the authentication_type.
+        password = None
+        private_key = None
+        if inputs.authentication_type == "password":
+            password = inputs.password
+            if password is None:
+                raise SnowflakeAuthenticationError("Password is required for password authentication")
+        elif inputs.authentication_type == "keypair":
+            if inputs.private_key is None:
+                raise SnowflakeAuthenticationError("Private key is required for keypair authentication")
+
+            private_key = load_private_key(inputs.private_key, inputs.private_key_passphrase)
+
+        else:
+            raise SnowflakeAuthenticationError(f"Invalid authentication type: {inputs.authentication_type}")
+
         return cls(
             user=inputs.user,
-            password=inputs.password,
             account=inputs.account,
             warehouse=inputs.warehouse,
             database=inputs.database,
             schema=inputs.schema,
             role=inputs.role,
+            password=password,
+            private_key=private_key,
         )
 
     @property
@@ -188,6 +271,7 @@ class SnowflakeClient:
                 database=self.database,
                 schema=self.schema,
                 role=self.role,
+                private_key=self.private_key,
             )
 
         except OperationalError as err:
@@ -228,7 +312,7 @@ class SnowflakeClient:
         parameters: dict | None = None,
         file_stream=None,
         poll_interval: float = 1.0,
-    ) -> list[tuple] | list[dict]:
+    ) -> tuple[list[tuple] | list[dict], list[ResultMetadata]]:
         """Wrap Snowflake connector's polling API in a coroutine.
 
         This enables asynchronous execution of queries to release the event loop to execute other tasks
@@ -239,6 +323,11 @@ class SnowflakeClient:
             query: A query string to run asynchronously.
             parameters: An optional dictionary of parameters to bind to the query.
             poll_interval: Specify how long to wait in between polls.
+
+        Returns:
+            A tuple containing:
+            - The query results as a list of tuples or dicts
+            - The cursor description (containing list of fields in result)
         """
         with self.connection.cursor() as cursor:
             # Snowflake docs incorrectly state that the 'params' argument is named 'parameters'.
@@ -255,7 +344,8 @@ class SnowflakeClient:
         with self.connection.cursor() as cursor:
             cursor.get_results_from_sfqid(query_id)
             results = cursor.fetchall()
-        return results
+            description = cursor.description
+        return results, description
 
     async def aremove_internal_stage_files(self, table_name: str, table_stage_prefix: str) -> None:
         """Asynchronously remove files from internal table stage.
@@ -297,6 +387,27 @@ class SnowflakeClient:
 
         await self.execute_async_query(query)
         return None
+
+    async def aget_table_columns(self, table_name: str) -> list[str]:
+        """Get the column names for a given table.
+
+        Arguments:
+            table_name: The name of the table to get columns for.
+
+        Returns:
+            A list of column names.
+        """
+        try:
+            _, metadata = await self.execute_async_query(f"""
+                SELECT * FROM "{table_name}" LIMIT 0
+            """)
+        except snowflake.connector.errors.ProgrammingError as e:
+            if "does not exist" in str(e):
+                raise SnowflakeTableNotFoundError(table_name)
+            else:
+                raise
+
+        return [row.name for row in metadata]
 
     @contextlib.asynccontextmanager
     async def managed_table(
@@ -390,7 +501,7 @@ class SnowflakeClient:
         MATCH_BY_COLUMN_NAME = CASE_SENSITIVE
         PURGE = TRUE
         """
-        results = await self.execute_async_query(query)
+        results, _ = await self.execute_async_query(query)
 
         for query_result in results:
             if not isinstance(query_result, tuple):
@@ -426,6 +537,12 @@ class SnowflakeClient:
         person_distinct_id_version_key: str = "person_distinct_id_version",
     ):
         """Merge two identical person model tables in Snowflake."""
+
+        # handle the case where the final table doesn't contain all the fields present in the stage table
+        # (for example, if we've added new fields to the person model)
+        final_table_column_names = await self.aget_table_columns(final_table)
+        update_when_matched = [field for field in update_when_matched if field[0] in final_table_column_names]
+
         merge_condition = "ON "
 
         for n, field in enumerate(merge_key):
@@ -616,11 +733,7 @@ async def insert_into_snowflake_activity(inputs: SnowflakeInsertInputs) -> Recor
     async with (
         Heartbeater() as heartbeater,
         set_status_to_running_task(run_id=inputs.run_id, logger=logger),
-        get_client(team_id=inputs.team_id) as client,
     ):
-        if not await client.is_alive():
-            raise ConnectionError("Cannot establish connection to ClickHouse")
-
         _, details = await should_resume_from_activity_heartbeat(activity, SnowflakeHeartbeatDetails)
         if details is None:
             details = SnowflakeHeartbeatDetails()
@@ -653,7 +766,7 @@ async def insert_into_snowflake_activity(inputs: SnowflakeInsertInputs) -> Recor
         full_range = (data_interval_start, data_interval_end)
 
         queue = RecordBatchQueue(max_size_bytes=settings.BATCH_EXPORT_SNOWFLAKE_RECORD_BATCH_QUEUE_MAX_SIZE_BYTES)
-        producer = Producer(clickhouse_client=client)
+        producer = Producer()
         producer_task = producer.start(
             queue=queue,
             model_name=model_name,
@@ -666,6 +779,7 @@ async def insert_into_snowflake_activity(inputs: SnowflakeInsertInputs) -> Recor
             exclude_events=inputs.exclude_events,
             include_events=inputs.include_events,
             extra_query_parameters=extra_query_parameters,
+            use_latest_schema=True,
         )
         records_completed = 0
 
@@ -814,8 +928,11 @@ class SnowflakeBatchExportWorkflow(PostHogWorkflow):
         insert_inputs = SnowflakeInsertInputs(
             team_id=inputs.team_id,
             user=inputs.user,
-            password=inputs.password,
             account=inputs.account,
+            authentication_type=inputs.authentication_type,
+            password=inputs.password,
+            private_key=inputs.private_key,
+            private_key_passphrase=inputs.private_key_passphrase,
             warehouse=inputs.warehouse,
             database=inputs.database,
             schema=inputs.schema,

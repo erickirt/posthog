@@ -32,11 +32,13 @@ from posthog.temporal.batch_exports.batch_exports import (
     start_batch_export_run,
 )
 from posthog.temporal.batch_exports.snowflake_batch_export import (
+    InvalidPrivateKeyError,
     SnowflakeBatchExportInputs,
     SnowflakeBatchExportWorkflow,
     SnowflakeHeartbeatDetails,
     SnowflakeInsertInputs,
     insert_into_snowflake_activity,
+    load_private_key,
     snowflake_default_fields,
 )
 from posthog.temporal.common.clickhouse import ClickHouseClient
@@ -53,6 +55,17 @@ from posthog.temporal.tests.utils.persons import (
 )
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.django_db]
+
+EXPECTED_PERSONS_BATCH_EXPORT_FIELDS = [
+    "team_id",
+    "distinct_id",
+    "person_id",
+    "properties",
+    "person_version",
+    "person_distinct_id_version",
+    "created_at",
+    "_inserted_at",
+]
 
 
 class FakeSnowflakeCursor:
@@ -114,6 +127,9 @@ class FakeSnowflakeCursor:
             return [("test", "LOAD FAILED", 100, 99, 1, 1, "Some error on copy", 3)]
         else:
             return [("test", "LOADED", 100, 99, 1, 1, "Some error on copy", 3)]
+
+    def description(self):
+        return []
 
 
 class FakeSnowflakeConnection:
@@ -342,14 +358,15 @@ def snowflake_config(database, schema) -> dict[str, str]:
     We set default configuration values to support tests against the Snowflake API
     and tests that mock it.
     """
-    password = os.getenv("SNOWFLAKE_PASSWORD", "password")
     warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "warehouse")
     account = os.getenv("SNOWFLAKE_ACCOUNT", "account")
-    username = os.getenv("SNOWFLAKE_USERNAME", "username")
     role = os.getenv("SNOWFLAKE_ROLE", "role")
+    username = os.getenv("SNOWFLAKE_USERNAME", "username")
+    password = os.getenv("SNOWFLAKE_PASSWORD", "password")
+    private_key = os.getenv("SNOWFLAKE_PRIVATE_KEY")
+    private_key_passphrase = os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
 
     config = {
-        "password": password,
         "user": username,
         "warehouse": warehouse,
         "account": account,
@@ -357,6 +374,15 @@ def snowflake_config(database, schema) -> dict[str, str]:
         "schema": schema,
         "role": role,
     }
+    if private_key:
+        config["private_key"] = private_key
+        config["private_key_passphrase"] = private_key_passphrase
+        config["authentication_type"] = "keypair"
+    elif password:
+        config["password"] = password
+        config["authentication_type"] = "password"
+    else:
+        raise ValueError("Either password or private key must be set")
     return config
 
 
@@ -835,6 +861,7 @@ async def assert_clickhouse_records_in_snowflake(
     batch_export_model: BatchExportModel | BatchExportSchema | None = None,
     is_backfill: bool = False,
     sort_key: str = "event",
+    expected_fields: list[str] | None = None,
 ):
     """Assert ClickHouse records are written to Snowflake table.
 
@@ -848,6 +875,7 @@ async def assert_clickhouse_records_in_snowflake(
         exclude_events: Event names to be excluded from the export.
         include_events: Event names to be included in the export.
         batch_export_schema: Custom schema used in the batch export.
+        expected_fields: List of fields expected to be in the destination table.
     """
     snowflake_cursor.execute(f'SELECT * FROM "{table_name}"')
 
@@ -869,7 +897,9 @@ async def assert_clickhouse_records_in_snowflake(
         for row in rows
     ]
 
-    schema_column_names = [field["alias"] for field in snowflake_default_fields()]
+    schema_column_names = (
+        expected_fields if expected_fields is not None else [field["alias"] for field in snowflake_default_fields()]
+    )
     if batch_export_model is not None:
         if isinstance(batch_export_model, BatchExportModel):
             batch_export_schema = batch_export_model.schema
@@ -879,15 +909,9 @@ async def assert_clickhouse_records_in_snowflake(
         if batch_export_schema is not None:
             schema_column_names = [field["alias"] for field in batch_export_schema["fields"]]
         elif isinstance(batch_export_model, BatchExportModel) and batch_export_model.name == "persons":
-            schema_column_names = [
-                "team_id",
-                "distinct_id",
-                "person_id",
-                "properties",
-                "person_version",
-                "person_distinct_id_version",
-                "_inserted_at",
-            ]
+            schema_column_names = (
+                expected_fields if expected_fields is not None else EXPECTED_PERSONS_BATCH_EXPORT_FIELDS
+            )
 
     expected_records = []
     async for record_batch in iter_model_records(
@@ -900,6 +924,7 @@ async def assert_clickhouse_records_in_snowflake(
         include_events=include_events,
         destination_default_fields=snowflake_default_fields(),
         is_backfill=is_backfill,
+        use_latest_schema=True,
     ):
         for record in record_batch.to_pylist():
             expected_record = {}
@@ -938,13 +963,21 @@ async def assert_clickhouse_records_in_snowflake(
 
 REQUIRED_ENV_VARS = (
     "SNOWFLAKE_WAREHOUSE",
-    "SNOWFLAKE_PASSWORD",
     "SNOWFLAKE_ACCOUNT",
     "SNOWFLAKE_USERNAME",
 )
 
+
+def snowflake_env_vars_are_set():
+    if not all(env_var in os.environ for env_var in REQUIRED_ENV_VARS):
+        return False
+    if "SNOWFLAKE_PASSWORD" not in os.environ and "SNOWFLAKE_PRIVATE_KEY" not in os.environ:
+        return False
+    return True
+
+
 SKIP_IF_MISSING_REQUIRED_ENV_VARS = pytest.mark.skipif(
-    any(env_var not in os.environ for env_var in REQUIRED_ENV_VARS),
+    not snowflake_env_vars_are_set(),
     reason="Snowflake required env vars are not set",
 )
 
@@ -952,21 +985,32 @@ SKIP_IF_MISSING_REQUIRED_ENV_VARS = pytest.mark.skipif(
 @pytest.fixture
 def snowflake_cursor(snowflake_config):
     """Manage a snowflake cursor that cleans up after we are done."""
+    password = None
+    private_key = None
+    if snowflake_config["authentication_type"] == "keypair":
+        if snowflake_config.get("private_key") is None:
+            raise ValueError("Private key is required for keypair authentication")
+
+        private_key = load_private_key(snowflake_config["private_key"], snowflake_config["private_key_passphrase"])
+    else:
+        password = snowflake_config["password"]
+
     with snowflake.connector.connect(
         user=snowflake_config["user"],
-        password=snowflake_config["password"],
+        password=password,
         role=snowflake_config["role"],
         account=snowflake_config["account"],
         warehouse=snowflake_config["warehouse"],
+        private_key=private_key,
     ) as connection:
         cursor = connection.cursor()
-        cursor.execute(f"CREATE DATABASE \"{snowflake_config['database']}\"")
-        cursor.execute(f"CREATE SCHEMA \"{snowflake_config['database']}\".\"{snowflake_config['schema']}\"")
-        cursor.execute(f"USE SCHEMA \"{snowflake_config['database']}\".\"{snowflake_config['schema']}\"")
+        cursor.execute(f'CREATE DATABASE "{snowflake_config["database"]}"')
+        cursor.execute(f'CREATE SCHEMA "{snowflake_config["database"]}"."{snowflake_config["schema"]}"')
+        cursor.execute(f'USE SCHEMA "{snowflake_config["database"]}"."{snowflake_config["schema"]}"')
 
         yield cursor
 
-        cursor.execute(f"DROP DATABASE IF EXISTS \"{snowflake_config['database']}\" CASCADE")
+        cursor.execute(f'DROP DATABASE IF EXISTS "{snowflake_config["database"]}" CASCADE')
 
 
 TEST_MODELS: list[BatchExportModel | BatchExportSchema | None] = [
@@ -1658,3 +1702,98 @@ def test_snowflake_heartbeat_details_parses_from_tuple(details):
             dt.datetime.fromisoformat(expected_done_ranges[0][1]),
         )
     ]
+
+
+@SKIP_IF_MISSING_REQUIRED_ENV_VARS
+async def test_insert_into_snowflake_activity_handles_person_schema_changes(
+    clickhouse_client,
+    activity_environment,
+    snowflake_cursor,
+    snowflake_config,
+    generate_test_data,
+    data_interval_start,
+    data_interval_end,
+    ateam,
+):
+    """Test that the `insert_into_snowflake_activity` handles changes to the
+    person schema.
+
+    If we update the schema of the persons model we export, we should still be
+    able to export the data without breaking existing exports. For example, any
+    new fields should not be added to the destination (in future we may want to
+    allow this but for now we don't).
+
+    To replicate this situation we first export the data with the original
+    schema, then delete a column in the destination and then rerun the export.
+    """
+    model = BatchExportModel(name="persons", schema=None)
+
+    table_name = f"test_insert_activity_migration_table_{ateam.pk}"
+    insert_inputs = SnowflakeInsertInputs(
+        team_id=ateam.pk,
+        table_name=table_name,
+        data_interval_start=data_interval_start.isoformat(),
+        data_interval_end=data_interval_end.isoformat(),
+        batch_export_model=model,
+        **snowflake_config,
+    )
+
+    await activity_environment.run(insert_into_snowflake_activity, insert_inputs)
+
+    await assert_clickhouse_records_in_snowflake(
+        snowflake_cursor=snowflake_cursor,
+        clickhouse_client=clickhouse_client,
+        table_name=table_name,
+        team_id=ateam.pk,
+        data_interval_start=data_interval_start,
+        data_interval_end=data_interval_end,
+        batch_export_model=model,
+        sort_key="person_id",
+    )
+
+    # Drop the created_at column from the Snowflake table
+    snowflake_cursor.execute(f'ALTER TABLE "{table_name}" DROP COLUMN "created_at"')
+
+    _, persons_to_export_created = generate_test_data
+
+    for old_person in persons_to_export_created[: len(persons_to_export_created) // 2]:
+        new_person_id = uuid.uuid4()
+        new_person, _ = await generate_test_persons_in_clickhouse(
+            client=clickhouse_client,
+            team_id=ateam.pk,
+            start_time=data_interval_start,
+            end_time=data_interval_end,
+            person_id=new_person_id,
+            count=1,
+            properties={"utm_medium": "referral", "$initial_os": "Linux", "new_property": "Something"},
+        )
+
+        await generate_test_person_distinct_id2_in_clickhouse(
+            clickhouse_client,
+            ateam.pk,
+            person_id=uuid.UUID(new_person[0]["id"]),
+            distinct_id=old_person["distinct_id"],
+            version=old_person["version"] + 1,
+            timestamp=old_person["_timestamp"],
+        )
+
+    await activity_environment.run(insert_into_snowflake_activity, insert_inputs)
+
+    # This time we don't expect there to be a created_at column
+    expected_fields = [field for field in EXPECTED_PERSONS_BATCH_EXPORT_FIELDS if field != "created_at"]
+    await assert_clickhouse_records_in_snowflake(
+        snowflake_cursor=snowflake_cursor,
+        clickhouse_client=clickhouse_client,
+        table_name=table_name,
+        team_id=ateam.pk,
+        data_interval_start=data_interval_start,
+        data_interval_end=data_interval_end,
+        batch_export_model=model,
+        sort_key="person_id",
+        expected_fields=expected_fields,
+    )
+
+
+def test_load_private_key_raises_error_if_key_is_invalid():
+    with pytest.raises(InvalidPrivateKeyError):
+        load_private_key("invalid_key", None)

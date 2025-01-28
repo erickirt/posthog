@@ -12,7 +12,7 @@ import { Scene } from 'scenes/sceneTypes'
 import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
 
-import { DataTableNode, HogQLQuery, InsightVizNode, NodeKind } from '~/queries/schema'
+import { DataTableNode, HogQLQuery, InsightVizNode, NodeKind } from '~/queries/schema/schema-general'
 import { hogql } from '~/queries/utils'
 import {
     BaseMathType,
@@ -639,7 +639,7 @@ export const surveyLogic = kea<surveyLogicType>([
                 iteration_count: NEW_SURVEY.iteration_count,
                 iteration_frequency_days: NEW_SURVEY.iteration_frequency_days,
             })
-            actions.setFlagPropertyErrors(NEW_SURVEY.targeting_flag_filters)
+            actions.setFlagPropertyErrors(null)
         },
         submitSurveyFailure: async () => {
             // When errors occur, scroll to the error, but wait for errors to be set in the DOM first
