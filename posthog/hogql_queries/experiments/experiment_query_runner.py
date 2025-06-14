@@ -43,6 +43,7 @@ from posthog.hogql_queries.experiments.base_query_utils import (
     event_or_action_to_filter,
     get_data_warehouse_metric_source,
     get_metric_value,
+    is_continuous,
 )
 from posthog.hogql_queries.experiments.funnel_query_utils import (
     funnel_steps_to_filter,
@@ -58,7 +59,6 @@ from posthog.schema import (
     ExperimentFunnelMetric,
     ExperimentMeanMetric,
     ExperimentMetricMathType,
-    ExperimentMetricResult,
     ExperimentQueryResponse,
     ExperimentStatsBase,
     ExperimentSignificanceCode,
@@ -447,6 +447,12 @@ class ExperimentQueryRunner(QueryRunner):
                 match metric.source.math:
                     case ExperimentMetricMathType.UNIQUE_SESSION:
                         return parse_expr("toFloat(count(distinct metric_events.value))")
+                    case ExperimentMetricMathType.MIN:
+                        return parse_expr("min(coalesce(toFloat(metric_events.value), 0))")
+                    case ExperimentMetricMathType.MAX:
+                        return parse_expr("max(coalesce(toFloat(metric_events.value), 0))")
+                    case ExperimentMetricMathType.AVG:
+                        return parse_expr("avg(coalesce(toFloat(metric_events.value), 0))")
                     case _:
                         return parse_expr("sum(coalesce(toFloat(metric_events.value), 0))")
             case ExperimentFunnelMetric():
@@ -628,7 +634,7 @@ class ExperimentQueryRunner(QueryRunner):
 
         return sorted_results
 
-    def calculate(self) -> ExperimentQueryResponse | ExperimentMetricResult:
+    def calculate(self) -> ExperimentQueryResponse:
         sorted_results = self._evaluate_experiment_query()
 
         if self.stats_method == "frequentist":
@@ -651,8 +657,8 @@ class ExperimentQueryRunner(QueryRunner):
                     trends_variants = get_legacy_trends_variant_results(sorted_results)
                     self._validate_event_variants(trends_variants)
                     trends_control_variant, trends_test_variants = split_baseline_and_test_variants(trends_variants)
-                    match self.metric.source.math:
-                        case ExperimentMetricMathType.SUM:
+                    match is_continuous(self.metric.source.math):
+                        case True:
                             probabilities = calculate_probabilities_v2_continuous(
                                 control_variant=trends_control_variant,
                                 test_variants=trends_test_variants,
@@ -666,7 +672,7 @@ class ExperimentQueryRunner(QueryRunner):
                                 [trends_control_variant, *trends_test_variants]
                             )
                         # Otherwise, we default to count
-                        case _:
+                        case False:
                             probabilities = calculate_probabilities_v2_count(
                                 control_variant=trends_control_variant,
                                 test_variants=trends_test_variants,
@@ -769,6 +775,7 @@ class ExperimentQueryRunner(QueryRunner):
     def get_cache_payload(self) -> dict:
         payload = super().get_cache_payload()
         payload["experiment_response_version"] = 2
+        payload["stats_method"] = self.stats_method
         return payload
 
     def _is_stale(self, last_refresh: Optional[datetime], lazy: bool = False) -> bool:
