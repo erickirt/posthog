@@ -19,7 +19,7 @@ use crate::{
         decoding, evaluation::evaluate_feature_flags, flags::fetch_and_filter, properties,
         FeatureFlagEvaluationContext,
     },
-    properties::property_models::{OperatorType, PropertyFilter},
+    properties::property_models::{OperatorType, PropertyFilter, PropertyType},
     utils::test_utils::{
         insert_flags_for_team_in_redis, insert_new_team_in_pg, insert_person_for_team_in_pg,
         setup_pg_reader_client, setup_pg_writer_client, setup_redis_client,
@@ -149,7 +149,7 @@ async fn test_evaluate_feature_flags() {
                     key: "country".to_string(),
                     value: Some(json!("US")),
                     operator: Some(OperatorType::Exact),
-                    prop_type: "person".to_string(),
+                    prop_type: PropertyType::Person,
                     group_type_index: None,
                     negation: None,
                 }]),
@@ -231,7 +231,7 @@ async fn test_evaluate_feature_flags_with_errors() {
                     key: "id".to_string(),
                     value: Some(json!(999999999)), // Very large cohort ID that doesn't exist
                     operator: None,
-                    prop_type: "cohort".to_string(),
+                    prop_type: PropertyType::Cohort,
                     group_type_index: None,
                     negation: None,
                 }]),
@@ -277,7 +277,7 @@ async fn test_evaluate_feature_flags_with_errors() {
             enabled: false,
             variant: None,
             reason: FlagEvaluationReason {
-                code: "unknown".to_string(),
+                code: "dependency_not_found_cohort".to_string(),
                 condition_index: None,
                 description: None,
             },
@@ -852,7 +852,7 @@ async fn test_evaluate_feature_flags_with_overrides() {
                     key: "industry".to_string(),
                     value: Some(json!("tech")),
                     operator: Some(OperatorType::Exact),
-                    prop_type: "group".to_string(),
+                    prop_type: PropertyType::Group,
                     group_type_index: Some(0),
                     negation: None,
                 }]),
@@ -1095,9 +1095,14 @@ fn test_decode_request_content_types() {
 
 #[tokio::test]
 async fn test_fetch_and_filter_flags() {
-    let redis_client = setup_redis_client(None);
+    let redis_reader_client = setup_redis_client(None).await;
+    let redis_writer_client = setup_redis_client(None).await;
     let reader: Arc<dyn Client + Send + Sync> = setup_pg_reader_client(None).await;
-    let flag_service = FlagService::new(redis_client.clone(), reader.clone());
+    let flag_service = FlagService::new(
+        redis_reader_client.clone(),
+        redis_writer_client.clone(),
+        reader.clone(),
+    );
     let team = insert_new_team_in_pg(reader.clone(), None).await.unwrap();
 
     // Create a mix of survey and non-survey flags
@@ -1151,7 +1156,7 @@ async fn test_fetch_and_filter_flags() {
     // Insert flags into redis
     let flags_json = serde_json::to_string(&flags).unwrap();
     insert_flags_for_team_in_redis(
-        redis_client.clone(),
+        redis_reader_client.clone(),
         team.id,
         team.project_id,
         Some(flags_json),

@@ -16,6 +16,7 @@ import {
     IconPiggyBank,
     IconPlusSmall,
     IconRetention,
+    IconRetentionHeatmap,
     IconStar,
     IconStarFilled,
     IconStickiness,
@@ -89,7 +90,7 @@ export const QUERY_TYPES_METADATA: Record<NodeKind, InsightTypeMetadata> = {
     [NodeKind.CalendarHeatmapQuery]: {
         name: 'Calendar Heatmap',
         description: 'Visualize total or unique users broken down by day and hour.',
-        icon: IconHogQL,
+        icon: IconRetentionHeatmap,
         inMenu: true,
         // tooltipDescription TODO: Add tooltip description
     },
@@ -275,9 +276,9 @@ export const QUERY_TYPES_METADATA: Record<NodeKind, InsightTypeMetadata> = {
         icon: IconPiggyBank,
         inMenu: true,
     },
-    [NodeKind.RevenueAnalyticsInsightsQuery]: {
-        name: 'Revenue Analytics Insights',
-        description: 'View revenue analytics insights.',
+    [NodeKind.RevenueAnalyticsGrossRevenueQuery]: {
+        name: 'Revenue Analytics Gross Revenue',
+        description: 'View revenue analytics gross revenue.',
         icon: IconPiggyBank,
         inMenu: true,
     },
@@ -290,6 +291,12 @@ export const QUERY_TYPES_METADATA: Record<NodeKind, InsightTypeMetadata> = {
     [NodeKind.RevenueAnalyticsTopCustomersQuery]: {
         name: 'Revenue Analytics Top Customers',
         description: 'View revenue analytics top customers.',
+        icon: IconPiggyBank,
+        inMenu: true,
+    },
+    [NodeKind.RevenueAnalyticsRevenueQuery]: {
+        name: 'Revenue Analytics Revenue',
+        description: 'View revenue analytics MRR/ARR.',
         icon: IconPiggyBank,
         inMenu: true,
     },
@@ -449,6 +456,16 @@ export const QUERY_TYPES_METADATA: Record<NodeKind, InsightTypeMetadata> = {
         icon: IconLive,
         inMenu: false,
     },
+    [NodeKind.WebAnalyticsExternalSummaryQuery]: {
+        name: 'Web Analytics External Summary',
+        icon: IconPieChart,
+        inMenu: false,
+    },
+    [NodeKind.MarketingAnalyticsTableQuery]: {
+        name: 'Marketing Analytics Table',
+        icon: IconHogQL,
+        inMenu: false,
+    },
 }
 
 export const INSIGHT_TYPES_METADATA: Record<InsightType, InsightTypeMetadata> = {
@@ -491,6 +508,7 @@ export const INSIGHT_TYPE_OPTIONS: LemonSelectOptions<string> = [
 export const scene: SceneExport = {
     component: SavedInsights,
     logic: savedInsightsLogic,
+    settingSectionId: 'environment-product-analytics',
 }
 
 export function InsightIcon({

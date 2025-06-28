@@ -1,52 +1,17 @@
-import merge from 'deepmerge'
 import { DateTime } from 'luxon'
 
-import { DeepPartialHogFunctionInvocationGlobals, TemplateTester } from '../../test/test-helpers'
+import { createAdDestinationPayload, TemplateTester } from '../../test/test-helpers'
 import { template } from './snapchat.template'
 
 jest.setTimeout(2 * 60 * 1000)
-
-/**
- * Creates a standard payload for invokeMapping.
- * Allows overriding specific event and person properties.
- */
-
-const createPayload = (globals?: DeepPartialHogFunctionInvocationGlobals): DeepPartialHogFunctionInvocationGlobals => {
-    let defaultPayload = {
-        event: {
-            properties: {},
-            event: 'Order Completed',
-            uuid: 'event-id',
-            timestamp: '2025-01-01T00:00:00Z',
-            distinct_id: 'distinct-id',
-            elements_chain: '',
-            url: 'https://us.posthog.com/projects/1/events/1234',
-        },
-        person: {
-            id: 'person-id',
-            properties: {
-                email: 'example@posthog.com',
-                sccid: 'snapchat-id',
-            },
-            url: 'https://us.posthog.com/projects/1/persons/1234',
-        },
-    }
-
-    defaultPayload = merge(defaultPayload, globals ?? {})
-
-    return defaultPayload
-}
 
 describe('snapchat template', () => {
     const tester = new TemplateTester(template)
 
     beforeEach(async () => {
         await tester.beforeEach()
-        jest.useFakeTimers().setSystemTime(DateTime.fromISO('2025-01-01T00:00:00Z').toJSDate())
-    })
-
-    afterEach(() => {
-        jest.useRealTimers()
+        const fixedTime = DateTime.fromISO('2025-01-01T00:00:00Z').toJSDate()
+        jest.spyOn(Date, 'now').mockReturnValue(fixedTime.getTime())
     })
 
     it('works with single product event', async () => {
@@ -58,7 +23,7 @@ describe('snapchat template', () => {
                 },
                 pixelId: 'pixel-id',
             },
-            createPayload({
+            createAdDestinationPayload({
                 event: {
                     properties: {
                         product_id: '1bdfef47c9724b58b6831933',
@@ -106,7 +71,7 @@ describe('snapchat template', () => {
             }
         `)
 
-        const fetchResponse = tester.invokeFetchResponse(response.invocation, {
+        const fetchResponse = await tester.invokeFetchResponse(response.invocation, {
             response: { status: 200, headers: {} },
             body: '{"status": "OK"}',
         })
@@ -124,7 +89,7 @@ describe('snapchat template', () => {
                 },
                 pixelId: 'pixel-id',
             },
-            createPayload({
+            createAdDestinationPayload({
                 event: {
                     properties: {
                         checkout_id: 'e461659ed1714b9ebc3299ae',
@@ -179,7 +144,7 @@ describe('snapchat template', () => {
         expect(response.invocation.queue).toEqual('fetch')
         expect(response.invocation.queueParameters).toMatchInlineSnapshot(`
             {
-              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","sc_click_id":"snapchat-id","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"value":90,"currency":"USD","content_ids":["18499-12","94839-23"],"content_category":["merch","merch"],"contents":[{"item_price":30,"id":"18499-12","quantity":1,"delivery_category":"normal"},{"item_price":30,"id":"94839-23","quantity":2,"delivery_category":"normal"}],"num_items":3,"event_id":"event-id"}}]}",
+              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","ph":"c775e7b757ede630cd0aa1113bd102661ab38829ca52a6422ab782862f268646","sc_click_id":"snapchat-id","fn":"9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6","ln":"32e83e92d45d71f69dcf9d214688f0375542108631b45d344e5df2eb91c11566","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"value":90,"currency":"USD","content_ids":["18499-12","94839-23"],"content_category":["merch","merch"],"contents":[{"item_price":30,"id":"18499-12","quantity":1,"delivery_category":"normal"},{"item_price":30,"id":"94839-23","quantity":2,"delivery_category":"normal"}],"num_items":3,"event_id":"event-id"}}]}",
               "headers": {
                 "Content-Type": "application/json",
               },
@@ -189,7 +154,7 @@ describe('snapchat template', () => {
             }
         `)
 
-        const fetchResponse = tester.invokeFetchResponse(response.invocation, {
+        const fetchResponse = await tester.invokeFetchResponse(response.invocation, {
             response: { status: 200, headers: {} },
             body: '{"status": "OK"}',
         })
@@ -207,7 +172,7 @@ describe('snapchat template', () => {
                 },
                 pixelId: 'pixel-id',
             },
-            createPayload()
+            createAdDestinationPayload()
         )
 
         expect(response.error).toBeUndefined()
@@ -215,7 +180,7 @@ describe('snapchat template', () => {
         expect(response.invocation.queue).toEqual('fetch')
         expect(response.invocation.queueParameters).toMatchInlineSnapshot(`
             {
-              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","sc_click_id":"snapchat-id","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"num_items":0,"event_id":"event-id"}}]}",
+              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","ph":"c775e7b757ede630cd0aa1113bd102661ab38829ca52a6422ab782862f268646","sc_click_id":"snapchat-id","fn":"9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6","ln":"32e83e92d45d71f69dcf9d214688f0375542108631b45d344e5df2eb91c11566","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"num_items":0,"event_id":"event-id"}}]}",
               "headers": {
                 "Content-Type": "application/json",
               },
@@ -225,7 +190,7 @@ describe('snapchat template', () => {
             }
         `)
 
-        const fetchResponse = tester.invokeFetchResponse(response.invocation, {
+        const fetchResponse = await tester.invokeFetchResponse(response.invocation, {
             response: { status: 200, headers: {} },
             body: '{"status": "OK"}',
         })
@@ -243,7 +208,7 @@ describe('snapchat template', () => {
                 },
                 pixelId: 'pixel-id',
             },
-            createPayload()
+            createAdDestinationPayload()
         )
 
         expect(response.error).toBeUndefined()
@@ -251,7 +216,7 @@ describe('snapchat template', () => {
         expect(response.invocation.queue).toEqual('fetch')
         expect(response.invocation.queueParameters).toMatchInlineSnapshot(`
             {
-              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","sc_click_id":"snapchat-id","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"num_items":0,"event_id":"event-id"}}]}",
+              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","ph":"c775e7b757ede630cd0aa1113bd102661ab38829ca52a6422ab782862f268646","sc_click_id":"snapchat-id","fn":"9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6","ln":"32e83e92d45d71f69dcf9d214688f0375542108631b45d344e5df2eb91c11566","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"num_items":0,"event_id":"event-id"}}]}",
               "headers": {
                 "Content-Type": "application/json",
               },
@@ -261,7 +226,7 @@ describe('snapchat template', () => {
             }
         `)
 
-        const fetchResponse = tester.invokeFetchResponse(response.invocation, {
+        const fetchResponse = await tester.invokeFetchResponse(response.invocation, {
             response: { status: 400, headers: {} },
             body: '{"status": "Something went wrong", "message": "Invalid event properties"}',
         })
@@ -282,7 +247,7 @@ describe('snapchat template', () => {
                 pixelId: 'pixel-id',
                 testEventMode: true,
             },
-            createPayload()
+            createAdDestinationPayload()
         )
 
         expect(response.error).toBeUndefined()
@@ -290,7 +255,7 @@ describe('snapchat template', () => {
         expect(response.invocation.queue).toEqual('fetch')
         expect(response.invocation.queueParameters).toMatchInlineSnapshot(`
             {
-              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","sc_click_id":"snapchat-id","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"num_items":0,"event_id":"event-id"}}]}",
+              "body": "{"data":[{"event_name":"PURCHASE","action_source":"WEB","event_time":1735689600,"event_source_url":null,"user_data":{"em":"3d4eee8538a4bbbe2ef7912f90ee494c1280f74dd7fd81232e58deb9cb9997e3","ph":"c775e7b757ede630cd0aa1113bd102661ab38829ca52a6422ab782862f268646","sc_click_id":"snapchat-id","fn":"9baf3a40312f39849f46dad1040f2f039f1cffa1238c41e9db675315cfad39b6","ln":"32e83e92d45d71f69dcf9d214688f0375542108631b45d344e5df2eb91c11566","external_id":"b5400f5d931b20e0e905cc4a009a428ce3427b3110e3a2a1cfc7e6349beabc10"},"custom_data":{"num_items":0,"event_id":"event-id"}}]}",
               "headers": {
                 "Content-Type": "application/json",
               },
@@ -300,7 +265,7 @@ describe('snapchat template', () => {
             }
         `)
 
-        const fetchResponse = tester.invokeFetchResponse(response.invocation, {
+        const fetchResponse = await tester.invokeFetchResponse(response.invocation, {
             response: { status: 200, headers: {} },
             body: '{"status": "OK"}',
         })
@@ -318,7 +283,7 @@ describe('snapchat template', () => {
                 },
                 pixelId: 'pixel-id',
             },
-            createPayload({
+            createAdDestinationPayload({
                 event: {
                     properties: {
                         $ip: '123.123.123.123',
@@ -358,7 +323,7 @@ describe('snapchat template', () => {
             }
         `)
 
-        const fetchResponse = tester.invokeFetchResponse(response.invocation, {
+        const fetchResponse = await tester.invokeFetchResponse(response.invocation, {
             response: { status: 200, headers: {} },
             body: '{"status": "OK"}',
         })
@@ -371,7 +336,7 @@ describe('snapchat template', () => {
         ['missing pixel id', { oauth: { access_token: 'access-token' } }],
         ['missing access token', { pixelId: 'pixel-id' }],
     ])('handles %s', async (_, settings) => {
-        const response = await tester.invokeMapping('Order Completed', settings, createPayload())
+        const response = await tester.invokeMapping('Order Completed', settings, createAdDestinationPayload())
 
         expect(response.error).toMatchInlineSnapshot(`"Pixel ID and access token are required"`)
         expect(response.finished).toEqual(true)

@@ -39,8 +39,8 @@ DLT_TO_PA_TYPE_MAP = {
     "decimal": pa.float64(),
 }
 
-DEFAULT_NUMERIC_PRECISION = 76
-DEFAULT_NUMERIC_SCALE = 32
+DEFAULT_NUMERIC_PRECISION = 38  # Delta Lake maximum precision
+DEFAULT_NUMERIC_SCALE = 32  # Delta Lake maximum scale
 DEFAULT_PARTITION_TARGET_SIZE_IN_BYTES = 200 * 1024 * 1024  # 200 MB
 
 
@@ -48,7 +48,11 @@ class DuplicatePrimaryKeysException(Exception):
     pass
 
 
-class QueryTimeout(Exception):
+class QueryTimeoutException(Exception):
+    pass
+
+
+class TemporaryFileSizeExceedsLimitException(Exception):
     pass
 
 
@@ -356,6 +360,11 @@ def append_partition_key_to_table(
                     partition_array.append(date.strftime(date_format))
                 elif isinstance(date, datetime.datetime):
                     partition_array.append(date.strftime(date_format))
+                elif isinstance(date, datetime.date):
+                    partition_array.append(date.strftime(date_format))
+                elif isinstance(date, str):
+                    date = parser.parse(date)
+                    partition_array.append(date.strftime(date_format))
                 else:
                     partition_array.append("1970-01")
             else:
@@ -495,6 +504,11 @@ def _process_batch(table_data: list[dict], schema: Optional[pa.Schema] = None) -
     # Support both given schemas and inferred schemas
     if schema is None:
         try:
+            # Gather all unique keys from all items, not just the first
+            all_keys = set().union(*(d.keys() for d in table_data))
+            first_item = table_data[0]
+            first_item = {key: first_item.get(key, None) for key in all_keys}
+            table_data[0] = first_item
             arrow_schema = pa.Table.from_pylist(table_data).schema
         except:
             arrow_schema = None
@@ -655,7 +669,9 @@ def _process_batch(table_data: list[dict], schema: Optional[pa.Schema] = None) -
                     type=new_field_type,
                 )
             except pa.ArrowInvalid as e:
-                if len(e.args) > 0 and "does not fit into precision" in e.args[0]:
+                if len(e.args) > 0 and (
+                    "does not fit into precision" in e.args[0] or "would cause data loss" in e.args[0]
+                ):
                     number_arr = _build_decimal_type_from_defaults([_convert_to_decimal_or_none(x) for x in all_values])
                     new_field_type = number_arr.type
 

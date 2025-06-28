@@ -9,7 +9,10 @@ import { urls } from 'scenes/urls'
 
 import { ReplayTabs } from '~/types'
 
-import { RecordingsUniversalFilters } from '../filters/RecordingsUniversalFilters'
+import {
+    RecordingsUniversalFiltersEmbed,
+    RecordingsUniversalFiltersEmbedButton,
+} from '../filters/RecordingsUniversalFiltersEmbed'
 import { SessionRecordingPlayer } from '../player/SessionRecordingPlayer'
 import { SessionRecordingPreview } from './SessionRecordingPreview'
 import { SessionRecordingPlaylistLogicProps, sessionRecordingsPlaylistLogic } from './sessionRecordingsPlaylistLogic'
@@ -115,13 +118,10 @@ export function SessionRecordingsPlaylist({
                     headerActions={<SessionRecordingsPlaylistTopSettings filters={filters} setFilters={setFilters} />}
                     filterActions={
                         notebookNode || (!canMixFiltersAndPinned && !!logicProps.logicKey) ? null : (
-                            <RecordingsUniversalFilters
-                                resetFilters={resetFilters}
+                            <RecordingsUniversalFiltersEmbedButton
                                 filters={filters}
                                 setFilters={setFilters}
                                 totalFiltersCount={totalFiltersCount}
-                                allowReplayHogQLFilters={allowHogQLFilters}
-                                allowReplayGroupsFilters={allowReplayGroupsFilters}
                             />
                         )
                     }
@@ -166,6 +166,16 @@ export function SessionRecordingsPlaylist({
                                 />
                             </div>
                         )
+                    }
+                    filterContent={
+                        <RecordingsUniversalFiltersEmbed
+                            resetFilters={resetFilters}
+                            filters={filters}
+                            setFilters={setFilters}
+                            totalFiltersCount={totalFiltersCount}
+                            allowReplayHogQLFilters={allowHogQLFilters}
+                            allowReplayGroupsFilters={allowReplayGroupsFilters}
+                        />
                     }
                 />
             </div>
